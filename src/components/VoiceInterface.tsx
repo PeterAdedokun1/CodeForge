@@ -1,459 +1,632 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Loader2, Volume2, AlertTriangle, Brain, Heart, ChevronDown, ChevronUp } from 'lucide-react';
-import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import {
+  Mic, MicOff, Send, Loader2, AlertTriangle, Heart, ChevronDown, ChevronUp,
+  Wifi, WifiOff, Radio, MessageSquare, Volume2, VolumeX
+} from 'lucide-react';
 import { VoiceVisualizer } from './VoiceVisualizer';
+import { GeminiLiveSession, LiveSessionStatus, PCMCapturer } from '../lib/geminiLive';
 import { sendMessageToMIMI, ConversationMessage } from '../lib/gemini';
-import { calculateRisk, mergeRiskData, getRiskBgClass, RiskLevel, RiskAssessment } from '../lib/riskEngine';
+import { calculateRisk, mergeRiskData, getRiskBgClass, RiskAssessment } from '../lib/riskEngine';
+import { RiskData } from '../lib/gemini';
 import {
   getCurrentUser,
   getCurrentSession,
   startConversationSession,
   addMessageToSession,
-  updateSessionRisk,
   sessionToGeminiHistory,
   getPreviousSessionContext,
   updateUserLastSeen,
   saveLivePatientAlert,
   ConversationSession
 } from '../lib/memoryStore';
-import { RiskData } from '../lib/gemini';
-
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
-  riskData?: Partial<RiskData>;
-}
 
 interface VoiceInterfaceProps {
   onRiskUpdate?: (assessment: RiskAssessment) => void;
 }
 
-// Text-to-speech using Web Speech API
-function speakText(text: string, onEnd?: () => void): void {
-  if (!('speechSynthesis' in window)) {
-    onEnd?.();
-    return;
-  }
+type InputMode = 'voice' | 'text';
+type UIState = 'idle' | 'listening' | 'processing' | 'speaking' | 'connecting';
 
-  window.speechSynthesis.cancel(); // Cancel any ongoing speech
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: Date;
+  isPartial?: boolean;
+}
 
+// ─── Text-to-Speech for fallback ─────────────────────────────────────────────
+function speakText(text: string): void {
+  if (!('speechSynthesis' in window)) return;
+  window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.9;
-  utterance.pitch = 1.1;
+  utterance.rate = 0.92;
+  utterance.pitch = 1.05;
   utterance.volume = 1;
-
-  // Try to find a good voice
   const voices = window.speechSynthesis.getVoices();
-  const preferredVoice = voices.find(v =>
-    v.name.includes('Female') ||
-    v.name.includes('Samantha') ||
+  const preferred = voices.find(v =>
     v.name.includes('Google UK English Female') ||
-    v.name.includes('Karen') ||
-    v.lang.startsWith('en')
+    v.name.includes('Samantha') ||
+    v.name.includes('Female')
   );
-  if (preferredVoice) utterance.voice = preferredVoice;
-
-  utterance.onend = () => onEnd?.();
-  utterance.onerror = () => onEnd?.();
-
+  if (preferred) utterance.voice = preferred;
   window.speechSynthesis.speak(utterance);
 }
 
+function extractRiskFromText(text: string): { cleanText: string; riskData: RiskData | null } {
+  const riskMatch = text.match(/\[RISK_DATA:({[^}]+})\]/);
+  if (!riskMatch) return { cleanText: text, riskData: null };
+  try {
+    const riskData = JSON.parse(riskMatch[1]) as RiskData;
+    const cleanText = text.replace(/\[RISK_DATA:[^\]]+\]/g, '').trim();
+    return { cleanText, riskData };
+  } catch {
+    return { cleanText: text.replace(/\[RISK_DATA:[^\]]+\]/g, '').trim(), riskData: null };
+  }
+}
+
 export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
-  const [interfaceState, setInterfaceState] = useState<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [currentSession, setCurrentSession] = useState<ConversationSession | null>(null);
-  const [cumulativeRiskData, setCumulativeRiskData] = useState<Partial<RiskData>>({});
-  const [currentRisk, setCurrentRisk] = useState<RiskAssessment | null>(null);
+  const [inputMode, setInputMode] = useState<InputMode>('voice');
+  const [uiState, setUiState] = useState<UIState>('idle');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [textInput, setTextInput] = useState('');
+  const [liveStatus, setLiveStatus] = useState<LiveSessionStatus>('disconnected');
+  const [isLiveEnabled, setIsLiveEnabled] = useState(true); // Try Live API first
+  const [isMuted, setIsMuted] = useState(false);
   const [showRiskPanel, setShowRiskPanel] = useState(false);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const [currentRisk, setCurrentRisk] = useState<RiskAssessment | null>(null);
+  const [currentSession, setCurrentSession] = useState<ConversationSession | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [liveTranscript, setLiveTranscript] = useState(''); // Live speech-to-text display
   const [apiError, setApiError] = useState<string | null>(null);
+
+  const liveSessionRef = useRef<GeminiLiveSession | null>(null);
+  const pcmCapturerRef = useRef<PCMCapturer | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
+  const partialMessageIdRef = useRef<string | null>(null);
   const currentUser = getCurrentUser();
+  const isRecording = uiState === 'listening';
 
-  const {
-    isRecording,
-    recordingState,
-    audioLevel,
-    transcript,
-    error: recordError,
-    isSupported,
-    startRecording,
-    stopRecording,
-    resetRecording
-  } = useVoiceRecorder();
-
-  // Initialize session and greeting
+  // ─── Init session + greeting ────────────────────────────────────────────────
   useEffect(() => {
-    if (isInitialized) return;
-    setIsInitialized(true);
-
     let session = getCurrentSession();
-    if (!session || !currentUser) {
-      // Guest mode - create a temp session
+    if (!session) {
       const userId = currentUser?.userId || 'guest_' + Date.now();
       session = startConversationSession(userId);
     }
     setCurrentSession(session);
 
-    // Get previous context for memory feature
-    const previousContext = currentUser
+    // Get and show initial greeting
+    const previousContext = currentUser?.userId
       ? getPreviousSessionContext(currentUser.userId)
       : undefined;
 
-    // Generate MIMI greeting
-    const userName = currentUser?.name || 'Mama';
+    const greetingText = currentUser?.name
+      ? `Hello ${currentUser.name}! 👋 I'm MIMI, your personal maternal health companion. How you dey today, Mama? You feeling well?`
+      : `Hello! 👋 I'm MIMI, your personal maternal health companion. How you dey today, Mama?`;
 
-    const greetingText = previousContext
-      ? `Welcome back, ${userName}! I remember from your last visit — ${previousContext.split('.').slice(-1)[0].trim()}. How are you feeling today?`
-      : `Welcome to MIMI, ${userName}! I am your maternal health companion. How are you feeling today, Mama? Any symptoms you want to tell me about?`;
+    addGreetingMessage(greetingText);
 
-    setTimeout(() => {
-      const greetingMessage: Message = {
-        id: 'greeting',
-        role: 'assistant',
-        content: greetingText,
-        timestamp: new Date()
-      };
-      setMessages([greetingMessage]);
+    // Auto-connect Live API
+    initLiveSession(previousContext);
+  }, []);
 
-      // MIMI speaks the greeting
-      setInterfaceState('speaking');
-      speakText(greetingText, () => setInterfaceState('idle'));
-
-      if (currentUser) updateUserLastSeen(currentUser.userId);
-    }, 500);
-  }, [isInitialized, currentUser]);
-
+  // ─── Auto-scroll ────────────────────────────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const addGreetingMessage = (text: string) => {
+    const greetMsg: ChatMessage = {
+      id: 'greeting_' + Date.now(),
+      role: 'assistant',
+      text,
+      timestamp: new Date(),
+    };
+    setMessages([greetMsg]);
+  };
+
+  // ─── Gemini Live Session ────────────────────────────────────────────────────
+  const initLiveSession = useCallback(async (previousContext?: string) => {
+    if (liveSessionRef.current) {
+      liveSessionRef.current.disconnect();
+    }
+
+    const session = new GeminiLiveSession(
+      {
+        onStatusChange: (status) => {
+          setLiveStatus(status);
+          if (status === 'error' || status === 'disconnected') {
+            setIsLiveEnabled(false); // Fallback to standard API
+          }
+        },
+        onTextMessage: (text, _isPartial) => {
+          const { cleanText, riskData } = extractRiskFromText(text);
+          if (!cleanText) return;
+
+          // Update or create assistant message
+          const msgId = partialMessageIdRef.current || 'live_' + Date.now();
+          partialMessageIdRef.current = msgId;
+
+          setMessages(prev => {
+            const existing = prev.find(m => m.id === msgId);
+            if (existing) {
+              return prev.map(m => m.id === msgId ? { ...m, text: cleanText } : m);
+            }
+            return [...prev, { id: msgId, role: 'assistant', text: cleanText, timestamp: new Date() }];
+          });
+
+          if (riskData) handleRiskData(riskData);
+        },
+        onInputTranscript: (text) => {
+          setLiveTranscript(text);
+        },
+        onAudioReceived: (_data, _mimeType) => {
+          setUiState('speaking');
+        },
+        onError: (error) => {
+          console.warn('Live API error:', error);
+          setApiError(error);
+          setIsLiveEnabled(false);
+          setUiState('idle');
+        },
+        onTurnComplete: () => {
+          setUiState('idle');
+          partialMessageIdRef.current = null;
+          setLiveTranscript('');
+        },
+      },
+      currentUser?.name || 'Mama',
+      previousContext
+    );
+
+    liveSessionRef.current = session;
+    await session.connect();
+  }, [currentUser?.name]);
+
+  // ─── Risk processing ─────────────────────────────────────────────────────────
+  const [cumulativeRiskDataRef] = useState<{ current: Partial<RiskData> }>({ current: {} });
+
+  const handleRiskData = useCallback((riskData: RiskData) => {
+    const merged = mergeRiskData(cumulativeRiskDataRef.current, riskData);
+    cumulativeRiskDataRef.current = merged;
+    const assessment = calculateRisk(merged);
+    setCurrentRisk(assessment);
+    onRiskUpdate?.(assessment);
+
+    // Alert CHEW if high/critical
+    if (assessment.requiresAlert && currentUser) {
+      saveLivePatientAlert({
+        patientId: currentUser.userId,
+        patientName: currentUser.name,
+        riskScore: assessment.score,
+        riskLevel: assessment.level,
+        symptoms: assessment.flags.map(f => f.name),
+        timestamp: new Date().toISOString(),
+        location: currentUser.location,
+      });
+      setShowRiskPanel(true);
+    }
+  }, [currentUser, onRiskUpdate, cumulativeRiskDataRef]);
+
+  // ─── Handle mic button (Gemini Live streaming or fallback) ───────────────────
+  const handleMicPress = useCallback(async () => {
+    if (isRecording) {
+      // Stop recording
+      setUiState('processing');
+      pcmCapturerRef.current?.stop();
+      pcmCapturerRef.current = null;
+      // Signal end of audio to Live API
+      if (isLiveEnabled && liveSessionRef.current?.isConnected) {
+        liveSessionRef.current.sendAudioEnd();
+      }
+      setAudioLevel(0);
+      return;
+    }
+
+    // Start recording
+    setLiveTranscript('');
+    setUiState('listening');
+
+    if (isLiveEnabled && liveSessionRef.current?.isConnected) {
+      // ─ Gemini Live: stream raw PCM ─
+      try {
+        const capturer = new PCMCapturer();
+        capturer.onChunk = (base64) => {
+          liveSessionRef.current?.sendAudioChunk(base64);
+          // Fake audio level for visualizer
+          setAudioLevel(0.5 + Math.random() * 0.3);
+        };
+        await capturer.start();
+        pcmCapturerRef.current = capturer;
+      } catch (err) {
+        console.warn('PCM capture failed, falling back to Web Speech', err);
+        setIsLiveEnabled(false);
+        fallbackSpeechRecognition();
+      }
+    } else {
+      // ─ Fallback: Web Speech API ─
+      fallbackSpeechRecognition();
+    }
+  }, [isRecording, isLiveEnabled]);
+
+  const fallbackSpeechRecognition = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SR = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as (new () => { continuous: boolean; lang: string; interimResults: boolean; onresult: (e: { results: { [key: number]: { isFinal: boolean;[key: number]: { transcript: string } } } }) => void; onerror: () => void; onend: () => void; start: () => void }) | null;
+    if (!SR) {
+      setApiError('Speech recognition not supported. Please type instead.');
+      setUiState('idle');
+      setInputMode('text');
+      return;
+    }
+    const recognition = new SR();
+    recognition.continuous = false;
+    recognition.lang = 'en-NG';
+    recognition.interimResults = true;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      const result = (event.results as SpeechRecognitionResultList)[event.results.length - 1];
+      const transcript = result[0].transcript;
+      setLiveTranscript(transcript);
+      if (result.isFinal) {
+        handleSendMessage(transcript);
+      }
+    };
+    recognition.onerror = () => {
+      setUiState('idle');
+      setLiveTranscript('');
+    };
+    recognition.onend = () => {
+      if (uiState === 'listening') setUiState('idle');
+    };
+    recognition.start();
+    setAudioLevel(0.5);
+  }, []);
+
+  // ─── Send text/voice message through standard Gemini API (fallback) ──────────
   const handleSendMessage = useCallback(async (userText: string) => {
     if (!userText.trim()) return;
 
+    const trimmed = userText.trim();
+    const userMsg: ChatMessage = {
+      id: 'user_' + Date.now(),
+      role: 'user',
+      text: trimmed,
+      timestamp: new Date(),
+    };
+
+    setMessages(prev => [...prev, userMsg]);
+    setTextInput('');
+    setLiveTranscript('');
+    setUiState('processing');
     setApiError(null);
 
-    // Add user message
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: userText,
-      timestamp: new Date()
-    };
-    setMessages(prev => [...prev, userMessage]);
-
-    setInterfaceState('processing');
-
-    // Update session
-    let session = currentSession;
-    if (session) {
-      session = addMessageToSession(session, 'user', userText);
-      setCurrentSession(session);
+    // If Live API connected — send as text
+    if (isLiveEnabled && liveSessionRef.current?.isConnected) {
+      liveSessionRef.current.sendText(trimmed);
+      return;
     }
 
+    // ─ Fallback: Standard Gemini REST API ─
     try {
-      // Build conversation history for Gemini
-      const history: ConversationMessage[] = session
-        ? sessionToGeminiHistory(session).slice(0, -1) // Exclude the message we just added
-        : [];
+      let session = currentSession;
+      if (!session) {
+        const userId = currentUser?.userId || 'guest';
+        session = startConversationSession(userId);
+        setCurrentSession(session);
+      }
 
-      const previousContext = currentUser
+      const history: ConversationMessage[] = sessionToGeminiHistory(session);
+      const previousContext = currentUser?.userId
         ? getPreviousSessionContext(currentUser.userId)
         : undefined;
 
       const response = await sendMessageToMIMI(
-        userText,
+        trimmed,
         history,
-        currentUser?.name || 'Mama',
+        currentUser?.name,
         previousContext
       );
 
-      // Process risk data if provided by Gemini
-      let updatedRiskData = cumulativeRiskData;
-      if (response.riskData) {
-        updatedRiskData = mergeRiskData(cumulativeRiskData, response.riskData);
-        setCumulativeRiskData(updatedRiskData);
+      const { cleanText, riskData } = extractRiskFromText(response.text);
 
-        // Calculate risk assessment
-        const assessment = calculateRisk(updatedRiskData);
-        setCurrentRisk(assessment);
-        onRiskUpdate?.(assessment);
-
-        // Auto-show risk panel if medium or higher
-        if (assessment.level !== 'low') {
-          setShowRiskPanel(true);
-        }
-
-        // Update session risk
-        if (session) {
-          session = updateSessionRisk(session, assessment.score, assessment.level, updatedRiskData);
-          setCurrentSession(session);
-        }
-
-        // If high risk, save as live patient alert for CHEW dashboard
-        if (assessment.requiresAlert && currentUser) {
-          saveLivePatientAlert({
-            patientId: currentUser.userId,
-            patientName: currentUser.name,
-            riskScore: assessment.score,
-            riskLevel: assessment.level,
-            symptoms: assessment.flags.map(f => f.name),
-            timestamp: new Date().toISOString(),
-            location: currentUser.location
-          });
-        }
-      }
-
-      // Add AI response
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
+      const assistantMsg: ChatMessage = {
+        id: 'ai_' + Date.now(),
         role: 'assistant',
-        content: response.text,
+        text: cleanText,
         timestamp: new Date(),
-        riskData: response.riskData || undefined
       };
-      setMessages(prev => [...prev, aiMessage]);
+      setMessages(prev => [...prev, assistantMsg]);
 
-      // MIMI speaks the response
-      setInterfaceState('speaking');
-      speakText(response.text, () => setInterfaceState('idle'));
+      // TTS fallback
+      if (!isMuted) speakText(cleanText);
+      setUiState('speaking');
+      setTimeout(() => setUiState('idle'), 3000);
 
-      // Save AI message to session
-      if (session) {
-        session = addMessageToSession(session, 'assistant', response.text, response.riskData || undefined);
-        setCurrentSession(session);
-      }
+      // Update session
+      let updatedSession = addMessageToSession(session, 'user', trimmed);
+      updatedSession = addMessageToSession(updatedSession, 'assistant', cleanText);
+      setCurrentSession(updatedSession);
 
-    } catch (err: any) {
-      console.error('Error calling MIMI:', err);
-      setApiError(err.message || 'Connection error');
+      if (response.riskData) handleRiskData(response.riskData);
+      if (riskData) handleRiskData(riskData);
 
-      const errorMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: "Sorry Mama, I dey have small connection problem. You fit try again? I dey here for you.",
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, errorMsg]);
-      setInterfaceState('idle');
+      if (currentUser) updateUserLastSeen(currentUser.userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Connection error';
+      setApiError(msg);
+      setUiState('idle');
     }
-  }, [currentSession, cumulativeRiskData, currentUser, onRiskUpdate]);
+  }, [currentSession, currentUser, isLiveEnabled, isMuted, handleRiskData]);
 
-  const handleMicrophoneClick = useCallback(async () => {
-    if (!isSupported) {
-      alert('Voice recording is not supported in your browser. Please use Chrome or Edge.');
-      return;
+  // ─── Handle "send" on text box ───────────────────────────────────────────────
+  const handleTextSend = useCallback(() => {
+    if (textInput.trim()) {
+      handleSendMessage(textInput.trim());
     }
+  }, [textInput, handleSendMessage]);
 
-    if (isRecording) {
-      setInterfaceState('processing');
-      await stopRecording();
-
-      if (transcript && transcript.trim()) {
-        await handleSendMessage(transcript.trim());
-      } else {
-        setInterfaceState('idle');
-      }
-      resetRecording();
-    } else {
-      // Stop any speech before listening
-      window.speechSynthesis?.cancel();
-      setInterfaceState('listening');
-      await startRecording();
-    }
-  }, [isRecording, isSupported, stopRecording, startRecording, transcript, handleSendMessage, resetRecording]);
-
-  const getRiskLevelLabel = (level: RiskLevel) => {
-    switch (level) {
-      case 'critical': return '🚨 CRITICAL';
-      case 'high': return '⚠️ HIGH RISK';
-      case 'medium': return '⚡ MEDIUM RISK';
-      case 'low': return '✅ LOW RISK';
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleTextSend();
     }
   };
 
-  const getButtonContent = () => {
-    switch (interfaceState) {
-      case 'listening':
-        return {
-          icon: <Mic className="w-12 h-12" />,
-          text: 'Listening... Tap to send',
-          color: 'bg-pink-500 hover:bg-pink-600 animate-pulse shadow-pink-300 shadow-2xl'
-        };
-      case 'processing':
-        return {
-          icon: <Loader2 className="w-12 h-12 animate-spin" />,
-          text: 'MIMI is thinking...',
-          color: 'bg-purple-500 shadow-purple-300 shadow-2xl'
-        };
-      case 'speaking':
-        return {
-          icon: <Volume2 className="w-12 h-12 animate-bounce" />,
-          text: 'MIMI is speaking...',
-          color: 'bg-indigo-500 shadow-indigo-300 shadow-2xl'
-        };
-      default:
-        return {
-          icon: <MicOff className="w-12 h-12" />,
-          text: 'Tap to speak to MIMI',
-          color: 'bg-gradient-to-br from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 shadow-pink-200 shadow-xl'
-        };
+  // ─── Status chip helper ──────────────────────────────────────────────────────
+  const getLiveStatusChip = () => {
+    if (!isLiveEnabled) {
+      return (
+        <span className="flex items-center space-x-1 text-xs text-gray-400">
+          <WifiOff className="w-3 h-3" />
+          <span>Standard mode</span>
+        </span>
+      );
     }
+    const cfg: Record<LiveSessionStatus, { icon: React.ReactNode; label: string; color: string }> = {
+      connected: { icon: <Radio className="w-3 h-3 animate-pulse" />, label: 'Live', color: 'text-green-500' },
+      connecting: { icon: <Loader2 className="w-3 h-3 animate-spin" />, label: 'Connecting...', color: 'text-yellow-500' },
+      disconnected: { icon: <Wifi className="w-3 h-3" />, label: 'Disconnected', color: 'text-gray-400' },
+      error: { icon: <WifiOff className="w-3 h-3" />, label: 'Offline', color: 'text-red-400' },
+    };
+    const c = cfg[liveStatus];
+    return (
+      <span className={`flex items-center space-x-1 text-xs ${c.color}`}>
+        {c.icon}
+        <span>Gemini {c.label}</span>
+      </span>
+    );
   };
 
-  const buttonContent = getButtonContent();
+  const riskBgClass = currentRisk ? getRiskBgClass(currentRisk.level) : 'bg-green-50';
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-br from-pink-50 via-white to-purple-50">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-pink-500 to-purple-600 px-4 py-3 flex items-center justify-between shadow-lg">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-            <Heart className="w-5 h-5 text-white" />
+    <div className="flex flex-col h-full bg-gradient-to-b from-pink-50 via-white to-purple-50">
+
+      {/* ─── Header ────────────────────────────────────────────────────────── */}
+      <div className="shrink-0 px-4 pt-4 pb-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="relative w-10 h-10 bg-gradient-to-br from-pink-500 to-purple-600 rounded-full flex items-center justify-center shadow-lg">
+              <Heart className="w-5 h-5 text-white" />
+              {liveStatus === 'connected' && (
+                <span className="absolute -top-0.5 -right-0.5 w-3 h-3 bg-green-400 rounded-full border-2 border-white" />
+              )}
+            </div>
+            <div>
+              <h2 className="font-bold text-gray-800 leading-tight">MIMI</h2>
+              {getLiveStatusChip()}
+            </div>
           </div>
-          <div>
-            <h2 className="font-bold text-white text-sm">MIMI</h2>
-            <p className="text-pink-100 text-xs">{currentUser?.name ? `Hello, ${currentUser.name}` : 'Maternal Health AI'}</p>
+
+          <div className="flex items-center space-x-2">
+            {/* Mute toggle */}
+            <button
+              onClick={() => setIsMuted(m => !m)}
+              className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+              title={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted ? <VolumeX className="w-4 h-4 text-gray-400" /> : <Volume2 className="w-4 h-4 text-pink-500" />}
+            </button>
+
+            {/* Risk panel toggle */}
+            {currentRisk && (
+              <button
+                onClick={() => setShowRiskPanel(p => !p)}
+                className={`flex items-center space-x-1 px-3 py-1.5 rounded-full text-xs font-semibold ${riskBgClass} transition-all`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span className="capitalize">{currentRisk.level} Risk • {currentRisk.score}</span>
+                {showRiskPanel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Risk Score Badge */}
-        {currentRisk && (
-          <button
-            onClick={() => setShowRiskPanel(!showRiskPanel)}
-            className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-bold transition-all ${getRiskBgClass(currentRisk.level)}`}
-          >
-            <Brain className="w-3.5 h-3.5" />
-            <span>Risk: {currentRisk.score}</span>
-            {showRiskPanel ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          </button>
-        )}
-      </div>
-
-      {/* Risk Panel (collapsible) */}
-      {currentRisk && showRiskPanel && (
-        <div className={`border-b-2 p-4 ${getRiskBgClass(currentRisk.level)}`}>
-          <div className="flex items-center justify-between mb-2">
-            <span className="font-bold text-sm">{getRiskLevelLabel(currentRisk.level)}</span>
-            <span className="text-lg font-black">{currentRisk.score}/100</span>
-          </div>
-          {/* Score bar */}
-          <div className="w-full bg-white/50 rounded-full h-2 mb-2">
-            <div
-              className="h-2 rounded-full transition-all duration-700"
-              style={{
-                width: `${currentRisk.score}%`,
-                backgroundColor: currentRisk.level === 'critical' ? '#DC2626' :
-                  currentRisk.level === 'high' ? '#EA580C' :
-                    currentRisk.level === 'medium' ? '#D97706' : '#16A34A'
-              }}
-            />
-          </div>
-          {currentRisk.flags.length > 0 && (
-            <div className="space-y-1">
+        {/* Risk panel */}
+        {showRiskPanel && currentRisk && (
+          <div className={`mt-3 rounded-2xl p-4 border ${riskBgClass} shadow-sm`}>
+            <p className="font-semibold text-sm text-gray-800 mb-1.5">⚠️ {currentRisk.recommendation}</p>
+            <ul className="space-y-1">
               {currentRisk.flags.slice(0, 3).map((flag, i) => (
-                <div key={i} className="flex items-center space-x-2 text-xs">
-                  <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                <li key={i} className="text-xs text-gray-700 flex items-center space-x-1.5">
+                  <span className={`w-2 h-2 rounded-full ${flag.severity === 'critical' ? 'bg-red-500' : flag.severity === 'danger' ? 'bg-orange-500' : 'bg-yellow-500'}`} />
                   <span>{flag.name}</span>
-                </div>
+                </li>
               ))}
-            </div>
-          )}
-          {currentRisk.requiresAlert && (
-            <div className="mt-2 text-xs font-semibold bg-white/60 rounded px-2 py-1">
-              ⚕️ CHEW worker has been notified
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-        {recordError && (
-          <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-3 rounded text-sm">
-            {recordError}
+            </ul>
           </div>
         )}
+
+        {/* Error banner */}
         {apiError && (
-          <div className="bg-orange-100 border-l-4 border-orange-500 text-orange-700 p-3 rounded text-sm">
+          <div className="mt-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
             ⚠️ {apiError}
           </div>
         )}
+      </div>
 
-        {messages.length === 0 && (
-          <div className="text-center py-12">
-            <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center shadow-xl">
-              <Heart className="w-12 h-12 text-white" />
-            </div>
-            <h2 className="text-2xl font-bold text-gray-800 mb-2">Starting MIMI...</h2>
-            <p className="text-gray-500 text-sm">Your AI maternal health companion</p>
-          </div>
-        )}
-
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            {message.role === 'assistant' && (
-              <div className="w-8 h-8 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center flex-shrink-0 mr-2 mt-1 shadow">
-                <Heart className="w-4 h-4 text-white" />
+      {/* ─── Message Thread ─────────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+        {messages.map(msg => (
+          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            {msg.role === 'assistant' && (
+              <div className="w-7 h-7 bg-gradient-to-br from-pink-500 to-purple-600 rounded-full flex items-center justify-center mr-2 mt-1 shrink-0 shadow">
+                <Heart className="w-3.5 h-3.5 text-white" />
               </div>
             )}
-            <div
-              className={`max-w-[78%] rounded-2xl px-4 py-3 shadow-sm ${message.role === 'user'
-                ? 'bg-gradient-to-br from-pink-500 to-pink-600 text-white rounded-br-sm'
-                : 'bg-white text-gray-800 rounded-bl-sm border border-gray-100'
-                }`}
-            >
-              <p className="text-sm leading-relaxed">{message.content}</p>
-              <p className={`text-xs mt-1.5 ${message.role === 'user' ? 'text-pink-100' : 'text-gray-400'}`}>
-                {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            <div className={`max-w-[80%] px-4 py-3 rounded-2xl shadow-sm ${msg.role === 'user'
+              ? 'bg-gradient-to-br from-pink-500 to-purple-600 text-white rounded-tr-sm'
+              : 'bg-white text-gray-800 rounded-tl-sm border border-gray-100'
+              }`}>
+              <p className="text-sm leading-relaxed">{msg.text}</p>
+              <p className={`text-xs mt-1 ${msg.role === 'user' ? 'text-pink-200' : 'text-gray-400'}`}>
+                {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </p>
             </div>
           </div>
         ))}
-        <div ref={messagesEndRef} />
-      </div>
 
-      {/* Voice Input Area */}
-      <div className="border-t border-gray-100 bg-white/90 backdrop-blur-sm shadow-lg">
-        {interfaceState === 'listening' && (
-          <div className="px-4 pt-3">
-            <VoiceVisualizer
-              isRecording={isRecording}
-              audioLevel={audioLevel}
-              width={window.innerWidth - 32}
-              height={50}
-            />
-            {transcript && (
-              <div className="mt-2 p-2 bg-pink-50 rounded-lg border border-pink-100">
-                <p className="text-sm text-gray-700 italic">"{transcript}"</p>
+        {/* Live transcript preview */}
+        {liveTranscript && (
+          <div className="flex justify-end">
+            <div className="max-w-[80%] px-4 py-3 rounded-2xl bg-pink-100 text-pink-800 rounded-tr-sm border border-pink-200">
+              <p className="text-sm italic opacity-70">{liveTranscript}</p>
+              <div className="flex space-x-1 mt-1">
+                {[1, 2, 3].map(i => (
+                  <span key={i} className="w-1.5 h-1.5 bg-pink-400 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                ))}
               </div>
-            )}
+            </div>
           </div>
         )}
 
-        <div className="flex flex-col items-center justify-center py-6 px-4">
+        {/* Processing indicator */}
+        {uiState === 'processing' && (
+          <div className="flex justify-start">
+            <div className="w-7 h-7 bg-gradient-to-br from-pink-500 to-purple-600 rounded-full flex items-center justify-center mr-2 mt-1 shrink-0">
+              <Heart className="w-3.5 h-3.5 text-white" />
+            </div>
+            <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm">
+              <div className="flex items-center space-x-1.5">
+                {[0, 1, 2].map(i => (
+                  <span key={i} className="w-2 h-2 bg-pink-400 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />
+                ))}
+                <span className="text-xs text-gray-400 ml-2">MIMI is thinking...</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* ─── Input area ─────────────────────────────────────────────────────── */}
+      <div className="shrink-0 px-4 pb-6 pt-2">
+        {/* Mode toggle */}
+        <div className="flex bg-gray-100 rounded-xl p-1 mb-3">
           <button
-            onClick={handleMicrophoneClick}
-            disabled={interfaceState === 'processing'}
-            id="mimi-mic-button"
-            className={`${buttonContent.color}
-              w-24 h-24 rounded-full flex items-center justify-center
-              text-white transition-all duration-300 transform hover:scale-105
-              active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed`}
+            onClick={() => setInputMode('voice')}
+            className={`flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-sm font-medium transition-all ${inputMode === 'voice'
+              ? 'bg-white text-pink-600 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+              }`}
           >
-            {buttonContent.icon}
+            <Mic className="w-4 h-4" />
+            <span>Voice</span>
           </button>
-          <p className="mt-3 text-sm font-semibold text-gray-600">{buttonContent.text}</p>
-          {recordingState === 'recording' && (
-            <p className="mt-1 text-xs text-gray-400">Speak clearly, then tap again to send</p>
-          )}
+          <button
+            onClick={() => { setInputMode('text'); setTimeout(() => textInputRef.current?.focus(), 100); }}
+            className={`flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-sm font-medium transition-all ${inputMode === 'text'
+              ? 'bg-white text-pink-600 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+              }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Type</span>
+          </button>
         </div>
+
+        {inputMode === 'voice' ? (
+          /* ─ Voice mode ─ */
+          <div className="flex flex-col items-center space-y-3">
+            {isRecording && (
+              <VoiceVisualizer isRecording={isRecording} audioLevel={audioLevel} width={280} height={56} />
+            )}
+
+            <button
+              id="mimi-mic-button"
+              onClick={handleMicPress}
+              disabled={uiState === 'processing' || uiState === 'connecting'}
+              className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 ${isRecording
+                ? 'bg-red-500 hover:bg-red-600'
+                : uiState === 'processing'
+                  ? 'bg-gray-400'
+                  : 'bg-gradient-to-br from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700'
+                }`}
+            >
+              {isRecording && (
+                <>
+                  <span className="absolute inset-0 rounded-full bg-red-400/40 animate-ping" />
+                  <span className="absolute inset-0 rounded-full bg-red-400/20 animate-ping" style={{ animationDelay: '0.3s' }} />
+                </>
+              )}
+              {uiState === 'processing' ? (
+                <Loader2 className="w-8 h-8 text-white animate-spin" />
+              ) : isRecording ? (
+                <MicOff className="w-8 h-8 text-white relative z-10" />
+              ) : (
+                <Mic className="w-8 h-8 text-white relative z-10" />
+              )}
+            </button>
+
+            <p className="text-sm text-gray-500 font-medium">
+              {uiState === 'connecting' && 'Connecting to MIMI Live...'}
+              {uiState === 'idle' && (liveStatus === 'connected' ? 'Tap to speak with MIMI Live' : 'Tap to speak')}
+              {uiState === 'listening' && (liveStatus === 'connected' ? '🔴 Streaming to Gemini Live...' : '🔴 Listening...')}
+              {uiState === 'processing' && 'MIMI is thinking...'}
+              {uiState === 'speaking' && '🔊 MIMI is speaking...'}
+            </p>
+
+            {liveStatus === 'connected' && (
+              <div className="flex items-center space-x-1.5 px-3 py-1.5 bg-green-50 rounded-full border border-green-200">
+                <Radio className="w-3 h-3 text-green-500 animate-pulse" />
+                <span className="text-xs text-green-700 font-semibold">Gemini Live Active</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* ─ Text mode ─ */
+          <div className="flex items-end space-x-2">
+            <div className="flex-1 bg-white border-2 border-gray-200 focus-within:border-pink-400 rounded-2xl transition-colors overflow-hidden">
+              <input
+                ref={textInputRef}
+                id="mimi-text-input"
+                type="text"
+                value={textInput}
+                onChange={e => setTextInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Type your message to MIMI..."
+                disabled={uiState === 'processing'}
+                className="w-full px-4 py-3.5 text-gray-800 text-sm bg-transparent outline-none placeholder-gray-400"
+              />
+            </div>
+            <button
+              id="mimi-send-button"
+              onClick={handleTextSend}
+              disabled={!textInput.trim() || uiState === 'processing'}
+              className="w-12 h-12 rounded-2xl bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center shadow-lg disabled:opacity-40 hover:from-pink-600 hover:to-purple-700 transition-all active:scale-95"
+            >
+              {uiState === 'processing' ? (
+                <Loader2 className="w-5 h-5 text-white animate-spin" />
+              ) : (
+                <Send className="w-5 h-5 text-white" />
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

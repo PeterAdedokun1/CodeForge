@@ -1,0 +1,7 @@
+﻿src/components/VoiceInterface.tsx(16,3): error TS6133: 'updateSessionRisk' is declared but its value is never read.
+src/components/VoiceInterface.tsx(78,10): error TS6133: 'cumulativeRiskData' is declared but its value is never read.
+src/components/VoiceInterface.tsx(205,49): error TS2339: Property 'symptom' does not exist on type 'RiskFlag'.
+src/components/VoiceInterface.tsx(265,61): error TS2749: 'SpeechRecognition' refers to a value, but is being used as a type here. Did you mean 'typeof SpeechRecognition'?
+src/components/VoiceInterface.tsx(270,36): error TS2552: Cannot find name 'SpeechRecognitionEvent'. Did you mean 'SpeechRecognitionResult'?
+src/components/VoiceInterface.tsx(456,106): error TS2367: This comparison appears to be unintentional because the types '"warning" | "danger"' and '"high"' have no overlap.
+src/components/VoiceInterface.tsx(457,31): error TS2339: Property 'symptom' does not exist on type 'RiskFlag'.
