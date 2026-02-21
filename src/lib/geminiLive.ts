@@ -15,7 +15,7 @@ import { MIMI_SYSTEM_PROMPT } from './geminiPrompt';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
 
-// Stable Gemini Live model
+// Latest Gemini Live model with native audio support
 const LIVE_MODEL = 'gemini-2.0-flash-live-001';
 const WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
