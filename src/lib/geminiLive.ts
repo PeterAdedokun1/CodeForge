@@ -1,29 +1,25 @@
 /**
- * Gemini Live API integration using WebSockets via @google/genai SDK.
- * Supports: streaming microphone audio (real-time), typed text, and receives
- * both audio (PCM 24kHz) and text transcriptions back.
+ * Gemini Live API — pure WebSocket implementation for the browser.
  *
- * ⚠️ NOTE: API key is exposed client-side — fine for hackathon demo.
- * In production, use ephemeral tokens: https://ai.google.dev/gemini-api/docs/ephemeral-tokens
+ * The @google/genai SDK uses Node.js globals (process, ws) that break in Vite.
+ * This implementation uses the native browser WebSocket directly, which is
+ * exactly how the Gemini Live API works underneath.
+ *
+ * Protocol reference:
+ * https://ai.google.dev/api/generate-content#v1beta.BidiGenerateContent
+ *
+ * ⚠️ API key is in the URL — fine for hackathon demo (use ephemeral tokens in prod)
  */
 
-import { GoogleGenAI, Modality } from '@google/genai';
 import { MIMI_SYSTEM_PROMPT } from './geminiPrompt';
 
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
 
-// gemini-2.0-flash-live-001 is the stable Live API model
+// Stable Gemini Live model
 const LIVE_MODEL = 'gemini-2.0-flash-live-001';
+const WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
 export type LiveSessionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-
-export interface LiveMessage {
-    id: string;
-    role: 'user' | 'assistant';
-    text: string;
-    timestamp: Date;
-    isPartial?: boolean;
-}
 
 export interface GeminiLiveSessionCallbacks {
     onStatusChange: (status: LiveSessionStatus) => void;
@@ -35,20 +31,23 @@ export interface GeminiLiveSessionCallbacks {
 }
 
 export class GeminiLiveSession {
-    private ai: GoogleGenAI;
-    private session: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | null = null;
+    private ws: WebSocket | null = null;
     private callbacks: GeminiLiveSessionCallbacks;
     private status: LiveSessionStatus = 'disconnected';
     private userName: string;
     private previousContext?: string;
+    private setupSent = false;
 
-    // Audio playback queue
+    // Audio playback
     private audioContext: AudioContext | null = null;
     private audioQueue: AudioBuffer[] = [];
     private isPlayingAudio = false;
 
-    constructor(callbacks: GeminiLiveSessionCallbacks, userName = 'Mama', previousContext?: string) {
-        this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY || 'demo' });
+    constructor(
+        callbacks: GeminiLiveSessionCallbacks,
+        userName = 'Mama',
+        previousContext?: string
+    ) {
         this.callbacks = callbacks;
         this.userName = userName;
         this.previousContext = previousContext;
@@ -56,86 +55,129 @@ export class GeminiLiveSession {
 
     async connect(): Promise<boolean> {
         if (!GEMINI_API_KEY) {
-            this.callbacks.onError('No Gemini API key found. Add VITE_GEMINI_API_KEY to .env');
+            this.callbacks.onError('No API key. Add VITE_GEMINI_API_KEY to .env');
             return false;
         }
 
         this.setStatus('connecting');
 
-        try {
-            const systemInstruction = MIMI_SYSTEM_PROMPT +
-                `\n\nThe patient's name is ${this.userName}.` +
-                (this.previousContext ? `\nPrevious session context: ${this.previousContext}` : '');
+        return new Promise((resolve) => {
+            try {
+                this.ws = new WebSocket(WS_URL);
 
-            this.session = await this.ai.live.connect({
-                model: LIVE_MODEL,
-                config: {
-                    responseModalities: [Modality.TEXT], // TEXT so we also get transcriptions easily
-                    systemInstruction,
-                    inputAudioTranscription: {},   // transcribe what user says
-                    outputAudioTranscription: {},  // transcribe what MIMI says
-                },
-                callbacks: {
-                    onopen: () => {
-                        this.setStatus('connected');
-                    },
-                    onmessage: (message: unknown) => {
-                        this.handleMessage(message);
-                    },
-                    onerror: (e: { message: string }) => {
-                        this.callbacks.onError(`Live API error: ${e.message}`);
-                        this.setStatus('error');
-                    },
-                    onclose: (e: { reason: string }) => {
-                        console.log('Live session closed:', e.reason);
+                this.ws.onopen = () => {
+                    this.sendSetup();
+                };
+
+                this.ws.onmessage = (event: MessageEvent) => {
+                    this.handleMessage(event.data as string);
+                };
+
+                this.ws.onerror = () => {
+                    this.callbacks.onError(
+                        'Gemini Live WebSocket error — falling back to standard mode'
+                    );
+                    this.setStatus('error');
+                    resolve(false);
+                };
+
+                this.ws.onclose = (event) => {
+                    if (this.status === 'connecting' || this.status === 'connected') {
+                        console.log('Live session closed:', event.code, event.reason);
                         this.setStatus('disconnected');
-                    },
-                },
-            });
+                    }
+                    resolve(false);
+                };
 
-            return true;
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.callbacks.onError(`Failed to connect: ${msg}`);
-            this.setStatus('error');
-            return false;
-        }
+                // Resolve true once we send setup successfully (onopen fires)
+                const origOpen = this.ws.onopen;
+                this.ws.onopen = (ev) => {
+                    if (origOpen) (origOpen as (ev: Event) => void)(ev);
+                    resolve(true);
+                };
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.callbacks.onError(`WebSocket connect failed: ${msg}`);
+                this.setStatus('error');
+                resolve(false);
+            }
+        });
+    }
+
+    /** Send the BidiGenerateContent setup message */
+    private sendSetup() {
+        const systemInstruction =
+            MIMI_SYSTEM_PROMPT +
+            `\n\nThe patient's name is ${this.userName}.` +
+            (this.previousContext
+                ? `\nContext from last session: ${this.previousContext}`
+                : '');
+
+        const setupMsg = {
+            setup: {
+                model: `models/${LIVE_MODEL}`,
+                generation_config: {
+                    response_modalities: ['TEXT'],
+                    temperature: 0.75,
+                },
+                system_instruction: {
+                    parts: [{ text: systemInstruction }],
+                },
+                input_audio_transcription: {},
+                output_audio_transcription: {},
+            },
+        };
+
+        this.send(setupMsg);
+        // Status gets set to 'connected' after server sends setupComplete
     }
 
     /** Send a text message to MIMI */
     sendText(text: string): void {
-        if (!this.session) return;
-        this.session.sendClientContent({
-            turns: text,
-            turnComplete: true,
-        });
-    }
-
-    /** Send raw PCM audio chunk (from MediaRecorder / AudioWorklet)
-     *  data must be base64-encoded 16-bit PCM at 16kHz, mono
-     */
-    sendAudioChunk(base64PCM: string): void {
-        if (!this.session) return;
-        this.session.sendRealtimeInput({
-            audio: {
-                data: base64PCM,
-                mimeType: 'audio/pcm;rate=16000',
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const msg = {
+            client_content: {
+                turns: [
+                    {
+                        role: 'user',
+                        parts: [{ text }],
+                    },
+                ],
+                turn_complete: true,
             },
-        });
+        };
+        this.send(msg);
     }
 
-    /** Signal that the user has finished speaking */
+    /** Send a raw base64 PCM audio chunk (16kHz, 16-bit, mono) */
+    sendAudioChunk(base64PCM: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        const msg = {
+            realtime_input: {
+                media_chunks: [
+                    {
+                        data: base64PCM,
+                        mime_type: 'audio/pcm;rate=16000',
+                    },
+                ],
+            },
+        };
+        this.send(msg);
+    }
+
+    /** Signal that the user finished speaking */
     sendAudioEnd(): void {
-        if (!this.session) return;
-        // Send activity end to trigger model response
-        this.session.sendRealtimeInput({ activityEnd: {} });
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        this.send({ realtime_input: { activity_end: {} } });
     }
 
     disconnect(): void {
-        if (this.session) {
-            this.session.close();
-            this.session = null;
+        if (this.ws) {
+            this.ws.onclose = null; // Prevent triggering status changes
+            this.ws.close();
+            this.ws = null;
         }
+        this.stopAudio();
         this.setStatus('disconnected');
     }
 
@@ -143,44 +185,44 @@ export class GeminiLiveSession {
         return this.status === 'connected';
     }
 
-    // ─── Private helpers ──────────────────────────────────────────────────────
+    // ─── Private ──────────────────────────────────────────────────────────────
 
-    private setStatus(status: LiveSessionStatus) {
+    private send(data: unknown): void {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(data));
+        }
+    }
+
+    private setStatus(status: LiveSessionStatus): void {
         this.status = status;
         this.callbacks.onStatusChange(status);
     }
 
-    private handleMessage(message: unknown): void {
-        const msg = message as Record<string, unknown>;
-
-        // Text response from model
-        if (msg.text) {
-            this.callbacks.onTextMessage(msg.text as string, false);
+    private handleMessage(rawData: string): void {
+        let msg: Record<string, unknown>;
+        try {
+            msg = JSON.parse(rawData) as Record<string, unknown>;
+        } catch {
             return;
         }
 
-        // Server content (turn-based response)
+        // Setup complete → Now we're officially connected
+        if (msg.setupComplete !== undefined && !this.setupSent) {
+            this.setupSent = true;
+            this.setStatus('connected');
+            return;
+        }
+
+        // Server content (model response)
         const serverContent = msg.serverContent as Record<string, unknown> | undefined;
         if (serverContent) {
-            // Text transcription of MIMI's audio output
-            const outputTranscription = serverContent.outputTranscription as { text?: string } | undefined;
-            if (outputTranscription?.text) {
-                this.callbacks.onTextMessage(outputTranscription.text, false);
-            }
-
-            // Transcription of user's audio input
-            const inputTranscription = serverContent.inputTranscription as { text?: string } | undefined;
-            if (inputTranscription?.text) {
-                this.callbacks.onInputTranscript(inputTranscription.text);
-            }
-
-            // Model turn parts (inline text or audio)
+            // Model text parts
             const modelTurn = serverContent.modelTurn as { parts?: unknown[] } | undefined;
             if (modelTurn?.parts) {
                 for (const part of modelTurn.parts) {
                     const p = part as Record<string, unknown>;
-                    if (p.text) {
-                        this.callbacks.onTextMessage(p.text as string, false);
+                    if (typeof p.text === 'string' && p.text) {
+                        this.callbacks.onTextMessage(p.text, true);
                     }
                     if (p.inlineData) {
                         const inline = p.inlineData as { data: string; mimeType: string };
@@ -190,45 +232,67 @@ export class GeminiLiveSession {
                 }
             }
 
+            // Output transcription (what MIMI said, transcribed)
+            const outputTrans = serverContent.outputTranscription as { text?: string } | undefined;
+            if (outputTrans?.text) {
+                this.callbacks.onTextMessage(outputTrans.text, false);
+            }
+
+            // Input transcription (what user said, transcribed)
+            const inputTrans = serverContent.inputTranscription as { text?: string } | undefined;
+            if (inputTrans?.text) {
+                this.callbacks.onInputTranscript(inputTrans.text);
+            }
+
             // Turn complete
             if (serverContent.turnComplete) {
                 this.callbacks.onTurnComplete();
             }
 
-            // Interrupted (user interrupted MIMI)
+            // Interrupted
             if (serverContent.interrupted) {
                 this.stopAudio();
             }
         }
+
+        // Top-level text (some responses come here)
+        if (typeof msg.text === 'string' && msg.text) {
+            this.callbacks.onTextMessage(msg.text, false);
+        }
     }
 
-    /** Decode and play audio from base64 PCM 24kHz */
+    /** Decode and play 24kHz PCM audio from Gemini */
     private async playAudioBase64(base64: string): Promise<void> {
         try {
-            if (!this.audioContext) {
+            if (!this.audioContext || this.audioContext.state === 'closed') {
                 this.audioContext = new AudioContext({ sampleRate: 24000 });
             }
-            // Decode base64 → binary → ArrayBuffer
+            if (this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+
             const binaryString = atob(base64);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
             }
-            // Convert 16-bit PCM to Float32
+
+            // Convert 16-bit PCM → Float32
             const pcm16 = new Int16Array(bytes.buffer);
             const float32 = new Float32Array(pcm16.length);
             for (let i = 0; i < pcm16.length; i++) {
                 float32[i] = pcm16[i] / 32768.0;
             }
-            // Create AudioBuffer
+
             const audioBuffer = this.audioContext.createBuffer(1, float32.length, 24000);
             audioBuffer.copyToChannel(float32, 0);
             this.audioQueue.push(audioBuffer);
+
             if (!this.isPlayingAudio) {
                 this.playNextFromQueue();
             }
         } catch (e) {
-            console.warn('Audio decode error:', e);
+            console.warn('Audio decode/play error:', e);
         }
     }
 
@@ -249,70 +313,99 @@ export class GeminiLiveSession {
     private stopAudio(): void {
         this.audioQueue = [];
         this.isPlayingAudio = false;
-        // Re-create audio context to stop current playback
-        if (this.audioContext) {
-            this.audioContext.close();
+        if (this.audioContext && this.audioContext.state !== 'closed') {
+            this.audioContext.close().catch(() => { });
             this.audioContext = null;
         }
     }
 }
 
-/** Capture microphone as 16-bit PCM at 16kHz using AudioWorklet */
+/**
+ * Captures microphone audio as 16-bit PCM at 16kHz using AudioWorklet.
+ * Streams chunks back via `onChunk(base64)` callback.
+ */
 export class PCMCapturer {
     private audioContext: AudioContext | null = null;
     private mediaStream: MediaStream | null = null;
     private workletNode: AudioWorkletNode | null = null;
     private sourceNode: MediaStreamAudioSourceNode | null = null;
-    onChunk: (base64: string) => void = () => { };
+    public onChunk: (base64: string) => void = () => { };
+    public onLevel: (level: number) => void = () => { };
 
     async start(): Promise<void> {
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+            audio: {
+                sampleRate: 16000,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
         });
+
         this.audioContext = new AudioContext({ sampleRate: 16000 });
 
-        // Inline AudioWorklet processor to avoid a separate file
+        // Inline AudioWorklet — converts Float32 mic input to Int16 PCM chunks
         const workletCode = `
       class PCMProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this._buffer = [];
+          this._bufferSize = 2048; // ~128ms at 16kHz
+        }
         process(inputs) {
           const input = inputs[0];
           if (input && input[0]) {
             const float32 = input[0];
-            const int16 = new Int16Array(float32.length);
             for (let i = 0; i < float32.length; i++) {
-              const s = Math.max(-1, Math.min(1, float32[i]));
-              int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              this._buffer.push(float32[i]);
             }
-            this.port.postMessage(int16.buffer, [int16.buffer]);
+            if (this._buffer.length >= this._bufferSize) {
+              const chunk = this._buffer.splice(0, this._bufferSize);
+              const int16 = new Int16Array(chunk.length);
+              for (let i = 0; i < chunk.length; i++) {
+                const s = Math.max(-1, Math.min(1, chunk[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              }
+              this.port.postMessage({ pcm: int16.buffer, level: Math.max(...chunk.map(Math.abs)) }, [int16.buffer]);
+            }
           }
           return true;
         }
       }
       registerProcessor('pcm-processor', PCMProcessor);
     `;
+
         const blob = new Blob([workletCode], { type: 'application/javascript' });
-        const url = URL.createObjectURL(blob);
-        await this.audioContext.audioWorklet.addModule(url);
-        URL.revokeObjectURL(url);
+        const blobUrl = URL.createObjectURL(blob);
+        await this.audioContext.audioWorklet.addModule(blobUrl);
+        URL.revokeObjectURL(blobUrl);
 
         this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
         this.workletNode = new AudioWorkletNode(this.audioContext, 'pcm-processor');
 
-        this.workletNode.port.onmessage = (e: MessageEvent) => {
-            const buffer = e.data as ArrayBuffer;
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-            this.onChunk(base64);
+        this.workletNode.port.onmessage = (e: MessageEvent<{ pcm: ArrayBuffer; level: number }>) => {
+            const buffer = e.data.pcm;
+            const level = e.data.level;
+            // base64-encode the raw ArrayBuffer
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            this.onChunk(btoa(binary));
+            this.onLevel(level);
         };
 
         this.sourceNode.connect(this.workletNode);
-        this.workletNode.connect(this.audioContext.destination);
+        // Don't connect workletNode to destination — we don't want mic playback
     }
 
     stop(): void {
         this.workletNode?.disconnect();
         this.sourceNode?.disconnect();
         this.mediaStream?.getTracks().forEach(t => t.stop());
-        this.audioContext?.close();
+        this.audioContext?.close().catch(() => { });
         this.workletNode = null;
         this.sourceNode = null;
         this.mediaStream = null;

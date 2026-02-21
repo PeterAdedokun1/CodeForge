@@ -235,8 +235,9 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
         const capturer = new PCMCapturer();
         capturer.onChunk = (base64) => {
           liveSessionRef.current?.sendAudioChunk(base64);
-          // Fake audio level for visualizer
-          setAudioLevel(0.5 + Math.random() * 0.3);
+        };
+        capturer.onLevel = (level) => {
+          setAudioLevel(level);
         };
         await capturer.start();
         pcmCapturerRef.current = capturer;
