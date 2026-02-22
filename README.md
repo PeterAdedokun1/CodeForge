@@ -153,4 +153,3 @@ The risk engine (`riskEngine.ts`) maps reported symptoms to a score:
 
 ---
 
-*Built with ❤️ for Nigerian mothers. Every minute counts.*
