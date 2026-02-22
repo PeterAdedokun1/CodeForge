@@ -84,6 +84,8 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
   const [liveTranscript, setLiveTranscript] = useState('');
   const [apiError, setApiError] = useState<string | null>(null);
   const [isMimiSpeaking, setIsMimiSpeaking] = useState(false);
+  // Separate mic state from UI state — mic stays on until user explicitly mutes
+  const [isMicActive, setIsMicActive] = useState(false);
 
   const liveSessionRef = useRef<GeminiLiveSession | null>(null);
   const pcmCapturerRef = useRef<PCMCapturer | null>(null);
@@ -91,7 +93,8 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
   const textInputRef = useRef<HTMLInputElement>(null);
   const partialMessageIdRef = useRef<string | null>(null);
   const currentUser = getCurrentUser();
-  const isRecording = uiState === 'listening';
+  // Use dedicated mic state instead of deriving from uiState
+  const isRecording = isMicActive;
 
   // The user's display name — fallback to "Mama" if not set or invalid
   const userName = (currentUser?.name && currentUser.name.length >= 2 && /^[a-zA-Z\s\-']+$/.test(currentUser.name))
@@ -201,20 +204,25 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
           setLiveTranscript(text);
         },
         onAudioReceived: () => {
+          // MIMI started speaking — update visual state but keep mic active
           setUiState('speaking');
         },
         onError: (error) => {
           console.warn('Live API error:', error);
           setApiError(error);
           setIsLiveEnabled(false);
+          setIsMicActive(false); // Stop mic on error
           setUiState('idle');
         },
         onTurnComplete: () => {
-          setUiState(prev => prev === 'listening' ? 'listening' : 'idle');
+          // MIMI finished speaking — go back to idle visual state
+          // Mic stays active (isMicActive unchanged) — user can keep talking
+          setUiState('idle');
           partialMessageIdRef.current = null;
           setLiveTranscript('');
         },
         onInterrupted: () => {
+          // User interrupted MIMI
           setIsMimiSpeaking(false);
         },
         onSpeakingChange: (speaking) => {
@@ -235,6 +243,8 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
   // ─── Handle mic button ────────────────────────────────────────────
   const handleMicPress = useCallback(async () => {
     if (isRecording) {
+      // User explicitly clicked to MUTE — stop mic and capturer
+      setIsMicActive(false);
       setUiState('idle');
       pcmCapturerRef.current?.stop();
       pcmCapturerRef.current = null;
@@ -245,7 +255,9 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
       return;
     }
 
+    // User clicked to UNMUTE — start mic and capturer
     setLiveTranscript('');
+    setIsMicActive(true);
     setUiState('listening');
 
     if (isLiveEnabled && liveSessionRef.current?.isConnected) {
@@ -262,6 +274,7 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
       } catch (err) {
         console.warn('PCM capture failed:', err);
         setIsLiveEnabled(false);
+        setIsMicActive(false);
         fallbackSpeechRecognition();
       }
     } else {
@@ -274,12 +287,13 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
     const SR = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as (new () => { continuous: boolean; lang: string; interimResults: boolean; onresult: (e: { results: { [key: number]: { isFinal: boolean;[key: number]: { transcript: string } } } }) => void; onerror: () => void; onend: () => void; start: () => void }) | null;
     if (!SR) {
       setApiError('Speech recognition not supported. Use the chat instead.');
+      setIsMicActive(false);
       setUiState('idle');
       setShowChat(true);
       return;
     }
     const recognition = new SR();
-    recognition.continuous = false;
+    recognition.continuous = true; // Keep listening until user explicitly stops
     recognition.lang = 'en-NG';
     recognition.interimResults = true;
 
@@ -293,15 +307,19 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
       }
     };
     recognition.onerror = () => {
+      setIsMicActive(false);
       setUiState('idle');
       setLiveTranscript('');
     };
     recognition.onend = () => {
-      if (uiState === 'listening') setUiState('idle');
+      // Only stop if user explicitly muted (isMicActive is false)
+      if (!isMicActive) {
+        setUiState('idle');
+      }
     };
     recognition.start();
     setAudioLevel(0.5);
-  }, []);
+  }, [isMicActive]);
 
   // ─── Send text message (fallback) ─────────────────────────────────
   const handleSendMessage = useCallback(async (userText: string) => {
@@ -388,6 +406,7 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
 
   const handleCancel = useCallback(() => {
     if (isRecording) {
+      setIsMicActive(false);
       pcmCapturerRef.current?.stop();
       pcmCapturerRef.current = null;
       if (isLiveEnabled && liveSessionRef.current?.isConnected) {
@@ -399,27 +418,27 @@ export const VoiceInterface = ({ onRiskUpdate }: VoiceInterfaceProps) => {
     setLiveTranscript('');
   }, [isRecording, isLiveEnabled]);
 
-  // Orb state class
+  // Orb state class — use isRecording (isMicActive) for listening state
   const orbStateClass = isMimiSpeaking
     ? 'speaking'
-    : uiState === 'listening'
+    : isRecording
       ? 'listening'
       : uiState === 'processing'
         ? 'processing'
         : '';
 
-  const orbDynamicStyle = uiState === 'listening'
+  const orbDynamicStyle = isRecording
     ? { transform: `scale(${1 + audioLevel * 0.2})` }
     : {};
 
-  // Status subtitle
+  // Status subtitle — mic state takes priority
   const statusText = (() => {
-    if (uiState === 'idle') return 'Tap the microphone to talk to MIMI';
-    if (uiState === 'listening') return liveStatus === 'connected' ? '● Listening — speak naturally...' : 'Listening...';
+    if (isRecording && isMimiSpeaking) return '● Conversation active...';
+    if (isRecording) return liveStatus === 'connected' ? '● Listening — speak naturally...' : 'Listening...';
+    if (uiState === 'speaking' || isMimiSpeaking) return 'MIMI is speaking...';
     if (uiState === 'processing') return 'MIMI is thinking...';
-    if (uiState === 'speaking') return 'MIMI is speaking...';
     if (uiState === 'connecting') return 'Connecting to MIMI Live...';
-    return '';
+    return 'Tap the microphone to talk to MIMI';
   })();
 
   const riskBgClass = currentRisk ? getRiskBgClass(currentRisk.level) : 'bg-green-50';
