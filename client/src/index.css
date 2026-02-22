@@ -23,6 +23,7 @@
 }
 
 @layer components {
+
   /* Smooth scroll */
   .overflow-y-auto {
     scroll-behavior: smooth;
@@ -55,11 +56,27 @@
     background-clip: text;
   }
 
-  /* ─── Dark Voice Interface ──────────────────────────────────────── */
+  /* ─── Feminine Mid-Dark Theme ──────────────────────────────────────── */
 
-  /* Dark background gradient */
+  /* Soft feminine background gradient */
   .mimi-dark-bg {
-    background: linear-gradient(180deg, #0D0A1A 0%, #1A0A1A 30%, #2D0A1E 60%, #1A0A1A 100%);
+    background: linear-gradient(180deg, #2b1d24 0%, #3d2833 30%, #4a2f3d 60%, #3d2833 100%);
+  }
+
+  .mimi-bg-primary {
+    background-color: #2b1d24;
+  }
+
+  .mimi-bg-secondary {
+    background-color: #36252d;
+  }
+
+  .mimi-text-primary {
+    color: #fce7f3;
+  }
+
+  .mimi-text-muted {
+    color: #fbcfe8;
   }
 
   /* Glowing orb */
@@ -153,60 +170,119 @@
     inset: 0;
     z-index: 100;
     transform: translateY(100%);
-    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-    background: #0D0A1A;
+    transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+    background: #2b1d24;
   }
 
   .chat-panel.open {
     transform: translateY(0);
   }
 
-  /* Dark bottom nav */
+  /* Soft dark bottom nav */
   .mimi-nav {
-    background: rgba(13, 10, 26, 0.95);
+    background: rgba(43, 29, 36, 0.95);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
   }
 }
 
 /* ─── Keyframes ───────────────────────────────────────────────────── */
 
 @keyframes pulse-ring {
-  0% { transform: scale(1); opacity: 1; }
-  100% { transform: scale(1.4); opacity: 0; }
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
 }
 
 @keyframes orb-breathe {
-  0%, 100% { transform: scale(1); opacity: 0.85; }
-  50% { transform: scale(1.05); opacity: 1; }
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
 }
 
 @keyframes orb-speak {
-  0%, 100% { transform: scale(1); }
-  25% { transform: scale(1.12); }
-  50% { transform: scale(0.95); }
-  75% { transform: scale(1.08); }
+
+  0%,
+  100% {
+    transform: scale(1);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  25% {
+    transform: scale(1.15);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  50% {
+    transform: scale(0.96);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  75% {
+    transform: scale(1.10);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
 }
 
 @keyframes orb-listen {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
+
+  0%,
+  100% {
+    transform: scale(1);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+
+  50% {
+    transform: scale(1.08);
+    animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
 }
 
 @keyframes orb-process {
-  0% { transform: scale(1) rotate(0deg); opacity: 0.7; }
-  50% { transform: scale(1.03) rotate(180deg); opacity: 1; }
-  100% { transform: scale(1) rotate(360deg); opacity: 0.7; }
+  0% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0.7;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  50% {
+    transform: scale(1.03) rotate(180deg);
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  100% {
+    transform: scale(1) rotate(360deg);
+    opacity: 0.7;
+  }
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 4px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: #e9d5ff;
   border-radius: 999px;
@@ -216,4 +292,193 @@
 button {
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ─── Landing Page Animations ─────────────────────────────────────── */
+
+/* Fade in up animation */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+/* Staggered animation delays */
+.animation-delay-100 {
+  animation-delay: 100ms;
+}
+
+.animation-delay-200 {
+  animation-delay: 200ms;
+}
+
+.animation-delay-300 {
+  animation-delay: 300ms;
+}
+
+.animation-delay-400 {
+  animation-delay: 400ms;
+}
+
+.animation-delay-500 {
+  animation-delay: 500ms;
+}
+
+.animation-delay-1000 {
+  animation-delay: 1000ms;
+}
+
+/* Mask Image Gradient */
+.mask-image-gradient {
+  mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
+}
+
+/* Float animation for decorative elements */
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-20px);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Glow pulse for CTA buttons */
+@keyframes glowPulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 20px rgba(236, 72, 153, 0.4),
+      0 0 40px rgba(147, 51, 234, 0.2);
+  }
+
+  50% {
+    box-shadow: 0 0 30px rgba(236, 72, 153, 0.6),
+      0 0 60px rgba(147, 51, 234, 0.4);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+/* Gradient text animation */
+@keyframes gradientShift {
+
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.animate-gradient-text {
+  background-size: 200% auto;
+  animation: gradientShift 3s ease-in-out infinite;
+}
+
+/* Scale in animation */
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.5s ease-out forwards;
+}
+
+/* Slide in from left */
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-50px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-left {
+  animation: slideInLeft 0.6s ease-out forwards;
+}
+
+/* Slide in from right */
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(50px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 0.6s ease-out forwards;
+}
+
+/* Bounce subtle */
+@keyframes bounceSlight {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+.animate-bounce-slight {
+  animation: bounceSlight 2s ease-in-out infinite;
+}
+
+/* Shimmer effect for loading states */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
 }

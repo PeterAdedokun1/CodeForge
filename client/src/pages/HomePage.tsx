@@ -14,8 +14,8 @@ export const HomePage = () => {
       {latestRisk && latestRisk.requiresAlert && (
         <div className="fixed bottom-32 left-4 right-4 md:left-auto md:right-6 md:w-80 z-50">
           <div className={`rounded-2xl shadow-2xl p-4 border-l-4 ${latestRisk.level === 'critical'
-              ? 'bg-red-50 border-red-500'
-              : 'bg-orange-50 border-orange-500'
+            ? 'bg-red-50 border-red-500'
+            : 'bg-orange-50 border-orange-500'
             }`}>
             <div className="flex items-start space-x-3">
               <div className={`p-2 rounded-full ${latestRisk.level === 'critical' ? 'bg-red-100' : 'bg-orange-100'}`}>

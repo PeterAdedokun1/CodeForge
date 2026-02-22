@@ -86,6 +86,21 @@ class GeminiLiveBridge {
                         }
                     }
                 },
+                // Enable automatic voice activity detection (VAD)
+                // This detects when the user stops speaking and triggers turn completion
+                realtimeInputConfig: {
+                    automaticActivityDetection: {
+                        disabled: false,
+                        // Start of speech detection threshold (default is fine)
+                        startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                        // End of speech detection - wait a bit after user stops speaking
+                        endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+                        // Prefix padding: how much audio before speech detection to include
+                        prefixPaddingMs: 300,
+                        // Silence duration to consider end of turn (ms)
+                        silenceDurationMs: 1000,
+                    }
+                },
                 systemInstruction: {
                     parts: [
                         { text: `You are MIMI (Maternal Intelligence Monitoring Interface), a warm, caring AI maternal health companion for Nigerian mothers.
@@ -194,7 +209,29 @@ IMPORTANT: You must VERBALLY respond to the patient. Do not stay silent. Always 
                 }
             }
 
-            // 2. Handle Tool Call (if any tool calls are added in the future)
+            // 2. Handle turn completion (Gemini finished speaking)
+            if (response.serverContent && response.serverContent.turnComplete) {
+                console.log('✅ Turn complete - Gemini finished speaking');
+                this.clientSocket.emit('turn-complete');
+            }
+
+            // 3. Handle interruption (user started speaking while Gemini was talking)
+            if (response.serverContent && response.serverContent.interrupted) {
+                console.log('⚡ Interrupted - user spoke while Gemini was speaking');
+                this.clientSocket.emit('interrupted');
+            }
+
+            // 4. Handle user speech activity detection
+            if (response.realtimeInput && response.realtimeInput.activityStart) {
+                console.log('🎤 User started speaking (VAD detected)');
+                this.clientSocket.emit('user-speech-start');
+            }
+            if (response.realtimeInput && response.realtimeInput.activityEnd) {
+                console.log('🎤 User stopped speaking (VAD detected)');
+                this.clientSocket.emit('user-speech-end');
+            }
+
+            // 5. Handle Tool Call (if any tool calls are added in the future)
             if (response.toolCall) {
                 console.log("✓ Gemini requested tool:", JSON.stringify(response.toolCall));
                 // Tool handling can be added here if needed
