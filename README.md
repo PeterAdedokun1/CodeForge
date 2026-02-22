@@ -1,184 +1,155 @@
-# 🫀 MIMI — Maternal Intelligence Monitoring Interface
+# MIMI — Maternal Intelligence Monitoring Interface
 
-> **Cavista Hackathon 2026 (Feb 21-22) · Team Entry**
->
-> *A voice-first AI health companion that monitors, remembers, and protects Nigerian mothers.*
-
----
-
-## 🎯 The Problem
-
-**Nigeria has one of the world's highest maternal mortality rates.** Most deaths are preventable — caused by late detection of pre-eclampsia, postpartum hemorrhage, and sepsis. Women in rural and peri-urban areas often don't see a doctor until it's too late.
-
-## 💡 The Solution: MIMI
-
-MIMI is a **Progressive Web App (PWA)** that turns a basic smartphone into a 24/7 maternal health partner. Using voice-first AI in Pidgin English, MIMI:
-
-1. **Listens** — Conducts daily check-in conversations via voice
-2. **Understands** — Real-time risk scoring flags pre-eclampsia warning signs
-3. **Remembers** — Cross-session memory ensures continuity of care
-4. **Alerts** — Automatically notifies CHEW workers and hospitals when risk is HIGH
+> **Cavista Hackathon 2026 · Feb 21-22**
+> A voice-first AI health companion that monitors, remembers, and protects Nigerian mothers.
 
 ---
 
-## 🏗️ Architecture: Three Pillars
+## What it does
 
-### Pillar 1: Voice-First Conversation
-- **Web Speech API** for speech-to-text (no setup, works natively)
-- **Google Gemini 2.0 Flash** AI with a custom MIMI persona (Pidgin English, maternal health focused)
-- **Web Speech Synthesis** for text-to-speech responses
-- MIMI greets returning mothers by referencing their last session
+MIMI turns a basic smartphone into a 24/7 maternal health partner. It conducts daily check-in conversations via voice (in Pidgin English), scores symptoms in real-time against WHO danger signs, and automatically alerts community health workers and hospitals when risk is HIGH.
 
-### Pillar 2: The Risk Engine
-A **rule-based maternal risk scoring** system (`src/lib/riskEngine.ts`) aligned with WHO danger signs:
+**Three core pillars:**
 
-| Symptom | Score | Basis |
-|---------|-------|-------|
-| Blurred vision | +30 | Eclampsia sign |
-| Vaginal bleeding | +40 | Placental abruption |
-| Severe headache | +25 | Pre-eclampsia |
-| Significant swelling | +20 | Pre-eclampsia |
-| High BP | +25 | Hypertension |
-| Pre-eclampsia triad | +20 bonus | Combined presentation |
-| Reduced fetal movement | +25 | Fetal distress |
-
-Risk levels: `LOW (0-19)` → `MEDIUM (20-44)` → `HIGH (45-69)` → `CRITICAL (70+)`
-
-### Pillar 3: Tiered Alert System
-- **CHEW Dashboard** — Real-time patient list merging conversation-driven alerts + demo patients
-- **Hospital Dashboard** — Emergency alerts with OpenStreetMap location embed
-- **"Send Alert & Directions"** — Shows verified nearby hospitals
-- **Nurse Call Simulator** — TTS-powered nurse call playback (stretch feature ✅)
+1. **Conversation** — Real-time two-way voice via Gemini Live API (streamed PCM audio over Socket.IO)
+2. **Intelligence** — Rule-based risk engine flags pre-eclampsia, postpartum hemorrhage, and sepsis signs
+3. **Action** — CHEW and Hospital dashboards receive tiered alerts with patient location
 
 ---
 
-## 🚀 Demo Flow (3-minute pitch script)
+## Tech Stack
 
-1. **[Patient View]** Open app → See MIMI Login → Enter name "Amina" → Week 32
-2. **[MIMI Voice]** Tap mic → Say: *"My head dey pain me for 3 days and my feet don swell well well"*
-3. **[Risk Engine]** Watch risk score jump from 0 → 65 (HIGH RISK) in real-time
-4. **[CHEW View]** Switch role → See "Amina" appear at top of CHEW dashboard highlighted in red
-5. **[Hospital View]** Switch to Hospital → Click alert → See location map → Click "Nurse Call Simulator"
-6. **[Memory Demo]** Reload app → MIMI greets: *"Welcome back, Amina — last time you told me your head was hurting. How is it today?"*
-
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
+| Layer | Tech |
+|---|---|
 | Frontend | React 18 + Vite + TypeScript |
 | Styling | Tailwind CSS |
-| Voice STT | Web Speech API (built-in browser) |
-| Voice TTS | Web Speech Synthesis API (built-in) |
-| AI Brain | Google Gemini 2.0 Flash (`gemini-2.0-flash-exp`) |
-| Risk Engine | Custom rule-based engine (WHO-aligned) |
-| Memory | `localStorage` (works offline, no auth needed) |
-| Maps | OpenStreetMap (free, no API key needed) |
-| Backend | Supabase (optional, for persistence) |
-| PWA | Vite PWA plugin |
+| Live Voice (STT + TTS) | Google Gemini Live API (via server bridge) |
+| Fallback Voice | Web Speech API + Web Speech Synthesis |
+| Risk Engine | Custom rule-based scoring (WHO-aligned) |
+| Memory | `localStorage` — works offline, no auth friction |
+| Maps | OpenStreetMap (no API key needed) |
+| Backend | Node.js + Express + Socket.IO |
+| AI Bridge | `@google/genai` SDK (server-side, ephemeral tokens) |
 
 ---
 
-## 📦 Quick Start
+## Project Structure
+
+```
+project/
+├── client/               # React + Vite frontend
+│   ├── src/
+│   │   ├── lib/
+│   │   │   ├── geminiLive.ts   # Socket.IO ↔ Gemini Live bridge (client side)
+│   │   │   ├── gemini.ts       # Gemini text API + MIMI persona
+│   │   │   ├── riskEngine.ts   # WHO-aligned maternal risk scoring
+│   │   │   └── memoryStore.ts  # localStorage conversation memory
+│   │   ├── components/
+│   │   │   ├── VoiceInterface.tsx   # Core voice UI
+│   │   │   ├── CHEWDashboard.tsx    # Community health worker view
+│   │   │   └── HospitalAlert.tsx    # Hospital emergency dashboard
+│   │   └── pages/               # LoginPage, HomePage, CHEWPage, HospitalPage, ProfilePage
+│   └── .env                     # VITE_GEMINI_API_KEY, VITE_SERVER_URL, etc.
+│
+├── server/               # Node.js backend
+│   ├── index.js          # Express + Socket.IO entry point
+│   └── services/
+│       └── GeminiLiveBridge.js   # Streams audio to/from Gemini Live API
+│
+└── package.json          # Root scripts (runs client + server concurrently)
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
+- Node.js 18+
+- A [Google AI Studio](https://aistudio.google.com/) API key
+- Chrome or Edge (required for Web Speech API fallback)
+
+### 1. Install dependencies
 
 ```bash
-# Clone and install
-cd project
+# From the project root — installs both client and server deps
 npm install
+```
 
-# Set your Gemini API key (already set in .env)
-# Get free key at: https://aistudio.google.com/
+### 2. Configure environment
 
-# Run development server
+**`client/.env`**
+```env
+VITE_GEMINI_API_KEY=your_key_here
+VITE_SERVER_URL=http://localhost:3001
+```
+
+**`server/.env`**
+```env
+GEMINI_API_KEY=your_key_here
+PORT=3001
+```
+
+### 3. Run
+
+```bash
+# Starts both the React dev server (port 5173) and Node server (port 3001) together
 npm run dev
 ```
 
-Open `http://localhost:5173` in **Chrome or Edge** (for Web Speech API support).
+Or run separately:
 
-### Demo Role Switching
+```bash
+# Terminal 1 — backend
+cd server && npm start
 
-Switch between views using the **role switcher** in the left sidebar (desktop) or by adding `?role=chew` or `?role=hospital` to the URL:
+# Terminal 2 — frontend
+cd client && npm run dev
+```
 
-| Role | URL | View |
-|------|-----|------|
+Open **http://localhost:5173** in Chrome or Edge.
+
+---
+
+## Demo Roles
+
+Switch views by clicking the role switcher in the sidebar, or by URL:
+
+| Role | URL | Description |
+|---|---|---|
 | Patient | `localhost:5173/` | MIMI voice interface |
-| CHEW Worker | `localhost:5173/?role=chew` | Patient dashboard |
-| Hospital | `localhost:5173/?role=hospital` | Emergency alerts |
+| CHEW Worker | `localhost:5173/?role=chew` | Patient risk dashboard |
+| Hospital | `localhost:5173/?role=hospital` | Emergency alert dashboard |
 
 ---
 
-## 🔑 Environment Variables
+## Risk Scoring
 
-```env
-VITE_GEMINI_API_KEY=your_key_from_aistudio.google.com
-VITE_SUPABASE_URL=your_supabase_url       # Optional
-VITE_SUPABASE_ANON_KEY=your_anon_key      # Optional
-```
+The risk engine (`riskEngine.ts`) maps reported symptoms to a score:
 
----
+| Symptom | Score |
+|---|---|
+| Vaginal bleeding | +40 |
+| Blurred vision | +30 |
+| Reduced fetal movement | +25 |
+| Severe headache | +25 |
+| High blood pressure | +25 |
+| Pre-eclampsia triad (bonus) | +20 |
+| Significant swelling | +20 |
 
-## 🗂️ Project Structure
-
-```
-src/
-├── lib/
-│   ├── gemini.ts       # Google Gemini AI integration + MIMI persona
-│   ├── riskEngine.ts   # Rule-based maternal risk scoring (WHO-aligned)
-│   ├── memoryStore.ts  # localStorage conversation memory + live alerts
-│   └── supabase.ts     # Optional cloud persistence
-├── components/
-│   ├── VoiceInterface.tsx    # ★ Core: Gemini AI + TTS + risk display
-│   ├── AppLayout.tsx         # Auth routing + role switcher
-│   ├── CHEWDashboard.tsx     # Community health worker view
-│   ├── HospitalAlert.tsx     # Hospital emergency dashboard + map
-│   ├── HealthProfile.tsx     # Patient health profile
-│   └── VoiceVisualizer.tsx   # Audio waveform visualizer
-├── pages/
-│   ├── HomePage.tsx      # Patient voice interface
-│   ├── LoginPage.tsx     # Name/profile onboarding
-│   ├── CHEWPage.tsx      # CHEW dashboard (live + demo patients)
-│   ├── HospitalPage.tsx  # Hospital alerts
-│   └── ProfilePage.tsx   # Patient health summary
-└── hooks/
-    ├── useVoiceRecorder.ts  # MediaRecorder + Web Speech STT
-    └── useDemoData.ts       # Demo patient data (real Nigerian names/locations)
-```
+**Thresholds:** LOW (0–19) → MEDIUM (20–44) → HIGH (45–69) → CRITICAL (70+)
 
 ---
 
-## 🧑‍⚕️ Real Data
+## Environment Variables Reference
 
-All demo patients use **real Nigerian names, cities, and clinical presentations**:
-- Amina Ibrahim, 28y, Week 32, Ajegunle Lagos — HIGH RISK (pre-eclampsia signs)
-- Funke Adeyemi, 24y, Week 24, Ibadan — MEDIUM RISK
-- Zainab Mohammed, 31y, Week 36, Kano — MEDIUM RISK (hypertension)
-- Chiamaka Okonkwo, 22y, Week 16, Enugu — LOW RISK
-- Blessing Okoro, 26y, Week 28, Surulere Lagos — LOW RISK
-
-Hospital data uses real Lagos hospitals (LUTH, Apapa General, Lagos Island General).
-
----
-
-## 🎓 Key Design Decisions
-
-- **Fake nothing that matters** — The AI responses are real Gemini API calls, not hardcoded
-- **localStorage-first** — Works offline, no sign-up friction, works in low-connectivity areas
-- **Voice-first** — Designed for low-literacy users; text is secondary to speech
-- **Pidgin English** — Culturally appropriate; MIMI feels like a neighbour, not a chatbot
-- **Rule-based risk engine** — Explainable, auditable, can be validated by clinicians
-
----
-
-## 🏆 Hackathon Talking Points
-
-| Judge Question | Our Answer |
-|----------------|------------|
-| "Is it innovative?" | Voice-first in Pidgin English that **remembers** you across sessions |
-| "How does it prevent?" | Real-time symptom scoring catches pre-eclampsia **weeks** before crisis |
-| "Practical for Nigeria?" | PWA, works offline, no app store, no smartphone required |
-| "Can it scale?" | Built with free APIs. Gemini costs ~$0.001 per conversation |
-| "Is it working?" | Live demo — say anything and MIMI responds in 2 seconds |
+| Variable | Where | Required | Description |
+|---|---|---|---|
+| `VITE_GEMINI_API_KEY` | `client/.env` | Yes | Gemini API key for text fallback |
+| `VITE_SERVER_URL` | `client/.env` | Yes | Backend URL |
+| `VITE_SUPABASE_URL` | `client/.env` | No | Optional cloud persistence |
+| `VITE_SUPABASE_ANON_KEY` | `client/.env` | No | Optional cloud persistence |
+| `GEMINI_API_KEY` | `server/.env` | Yes | Gemini Live API key (server-side) |
+| `PORT` | `server/.env` | No | Server port (default: 3001) |
 
 ---
 
