@@ -34,9 +34,6 @@ export interface GeminiLiveSessionCallbacks {
     onTurnComplete: () => void;
     onInterrupted?: () => void;
     onSpeakingChange?: (isSpeaking: boolean) => void;
-    // VAD-based user speech activity
-    onUserSpeechStart?: () => void;
-    onUserSpeechEnd?: () => void;
 }
 
 export class GeminiLiveSession {
@@ -147,31 +144,6 @@ export class GeminiLiveSession {
                 }
                 this.callbacks.onAudioReceived(base64PCM, 'audio/pcm;rate=24000');
                 this.scheduleAudioPlayback(base64PCM);
-            });
-
-            // ── Turn completion and interruption events (VAD-based) ────────
-            socket.on('turn-complete', () => {
-                log('✅ Turn complete — Gemini finished speaking');
-                this.callbacks.onTurnComplete();
-            });
-
-            socket.on('interrupted', () => {
-                log('⚡ Interrupted — user spoke while Gemini was speaking');
-                this.stopAllAudio();
-                this.callbacks.onInterrupted?.();
-            });
-
-            // ── User speech activity detection (VAD) ────────
-            socket.on('user-speech-start', () => {
-                log('🎤 VAD: User started speaking');
-                // Notify UI that user is speaking (can be used for visual feedback)
-                this.callbacks.onUserSpeechStart?.();
-            });
-
-            socket.on('user-speech-end', () => {
-                log('🎤 VAD: User stopped speaking');
-                // Notify UI that user finished speaking - Gemini will respond
-                this.callbacks.onUserSpeechEnd?.();
             });
         });
     }
